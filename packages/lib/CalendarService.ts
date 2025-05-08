@@ -125,7 +125,8 @@ function createEvent(event: CalendarEvent) {
     `ORGANIZER;CN=${event.organizer.name}:mailto:${event.organizer.email}`,
     event.hideCalendarEventDetails && `CLASS:PRIVATE`,
     ...event.attendees.map(
-      (attendee) => `ATTENDEE;RSVP=FALSE;PARTSTAT=NEEDS-ACTION;CN=${attendee.name}:mailto:${attendee.email}`
+      (attendee) =>
+        `ATTENDEE;RSVP=FALSE;PARTSTAT=NEEDS-ACTION;SCHEDULE-AGENT=CLIENT;CN=${attendee.name}:mailto:${attendee.email}`
     ),
     `DURATION:PT${dayjs(event.endTime).diff(dayjs(event.startTime), "minute")}M`,
     `END:VEVENT`,
