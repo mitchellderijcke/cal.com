@@ -2,8 +2,6 @@
 /// <reference path="../types/ical.d.ts"/>
 import type { Prisma } from "@prisma/client";
 import ICAL from "ical.js";
-import type { Attendee, DateArray, DurationObject } from "ics";
-import { createEvent } from "ics";
 import type { DAVAccount, DAVCalendar, DAVObject } from "tsdav";
 import {
   createAccount,
@@ -18,7 +16,6 @@ import { v4 as uuidv4 } from "uuid";
 
 import dayjs from "@calcom/dayjs";
 import sanitizeCalendarObject from "@calcom/lib/sanitizeCalendarObject";
-import type { Person as AttendeeInCalendarEvent } from "@calcom/types/Calendar";
 import type {
   Calendar,
   CalendarEvent,
@@ -26,7 +23,6 @@ import type {
   EventBusyDate,
   IntegrationCalendar,
   NewCalendarEventType,
-  TeamMember,
 } from "@calcom/types/Calendar";
 import type { CredentialPayload } from "@calcom/types/Credential";
 
@@ -87,19 +83,59 @@ const applyTravelDuration = (event: ICAL.Event, seconds: number) => {
   return event;
 };
 
-const convertDate = (date: string): DateArray =>
-  dayjs(date)
-    .utc()
-    .toArray()
-    .slice(0, 6)
-    .map((v, i) => (i === 1 ? v + 1 : v)) as DateArray;
+const formatDate = (date: string): string => dayjs(date).utc().format("YYYYMMDDTHHmmss[Z]");
 
-const getDuration = (start: string, end: string): DurationObject => ({
-  minutes: dayjs(end).diff(dayjs(start), "minute"),
-});
+function foldLine(line: string | false | undefined) {
+  if (!line) return "";
 
-const mapAttendees = (attendees: AttendeeInCalendarEvent[] | TeamMember[]): Attendee[] =>
-  attendees.map(({ email, name }) => ({ name, email, partstat: "NEEDS-ACTION" }));
+  const buffer = Buffer.from(line.replace(/\r\n|\r|\n/g, "\r\n"));
+  const parts = [];
+
+  for (let i = 0; i < buffer.length; i += 75) {
+    parts.push(buffer.subarray(i, i + 75).toString());
+  }
+
+  return parts.join("\r\n\t");
+}
+
+function formatText(text: string) {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\r\n|\r|\n/g, "\\n")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,");
+}
+
+function createEvent(event: CalendarEvent) {
+  const location = getLocation(event);
+
+  return [
+    `BEGIN:VCALENDAR`,
+    `VERSION:2.0`,
+    `CALSCALE:GREGORIAN`,
+    `PRODID:adamgibbons/ics`,
+    `X-PUBLISHED-TTL:PT1H`,
+    `BEGIN:VEVENT`,
+    `UID:${event.uid}`,
+    `SUMMARY:${event.title}`,
+    `DTSTAMP:${formatDate(new Date().toISOString())}`,
+    `DTSTART:${formatDate(event.startTime)}`,
+    `DESCRIPTION:${formatText(getRichDescription(event))}`,
+    location && `LOCATION:${location}`,
+    `ORGANIZER;CN=${event.organizer.name}:mailto:${event.organizer.email}`,
+    event.hideCalendarEventDetails && `CLASS:PRIVATE`,
+    ...event.attendees.map(
+      (attendee) => `ATTENDEE;RSVP=FALSE;PARTSTAT=NEEDS-ACTION;CN=${attendee.name}:mailto:${attendee.email}`
+    ),
+    `DURATION:PT${dayjs(event.endTime).diff(dayjs(event.startTime), "minute")}M`,
+    `END:VEVENT`,
+    `END:VCALENDAR`,
+  ]
+    .filter(Boolean)
+    .map(foldLine)
+    .concat("")
+    .join("\r\n");
+}
 
 export default abstract class BaseCalendarService implements Calendar {
   private url = "";
@@ -128,13 +164,13 @@ export default abstract class BaseCalendarService implements Calendar {
   }
 
   private getAttendees(event: CalendarEvent) {
-    const attendees = mapAttendees(event.attendees);
+    const attendees = event.attendees.slice();
 
     if (event.team?.members) {
       const teamAttendeesWithoutCurrentUser = event.team.members.filter(
         (member) => member.email !== this.credential.user?.email
       );
-      attendees.push(...mapAttendees(teamAttendeesWithoutCurrentUser));
+      attendees.push(...teamAttendeesWithoutCurrentUser);
     }
 
     return attendees;
@@ -147,15 +183,9 @@ export default abstract class BaseCalendarService implements Calendar {
       const uid = uuidv4();
 
       // We create local ICS files
-      const { error, value: iCalString } = createEvent({
+      const iCalString = createEvent({
+        ...event,
         uid,
-        startInputType: "utc",
-        start: convertDate(event.startTime),
-        duration: getDuration(event.startTime, event.endTime),
-        title: event.title,
-        description: getRichDescription(event),
-        location: getLocation(event),
-        organizer: { email: event.organizer.email, name: event.organizer.name },
         attendees: this.getAttendees(event),
         /** according to https://datatracker.ietf.org/doc/html/rfc2446#section-3.2.1, in a published iCalendar component.
          * "Attendees" MUST NOT be present
@@ -163,11 +193,7 @@ export default abstract class BaseCalendarService implements Calendar {
          * [UPDATE]: Since we're not using the PUBLISH method to publish the iCalendar event and creating the event directly on iCal,
          * this shouldn't be an issue and we should be able to add attendees to the event right here.
          */
-        ...(event.hideCalendarEventDetails ? { classification: "PRIVATE" } : {}),
       });
-
-      if (error || !iCalString)
-        throw new Error(`Error creating iCalString:=> ${error?.message} : ${error?.name} `);
 
       const mainHostDestinationCalendar = event.destinationCalendar
         ? event.destinationCalendar.find((cal) => cal.credentialId === credentialId) ??
@@ -224,30 +250,12 @@ export default abstract class BaseCalendarService implements Calendar {
       const events = await this.getEventsByUID(uid);
 
       /** We generate the ICS files */
-      const { error, value: iCalString } = createEvent({
+      const iCalString = createEvent({
+        ...event,
         uid,
-        startInputType: "utc",
-        start: convertDate(event.startTime),
-        duration: getDuration(event.startTime, event.endTime),
-        title: event.title,
-        description: getRichDescription(event),
-        location: getLocation(event),
-        organizer: { email: event.organizer.email, name: event.organizer.name },
         attendees: this.getAttendees(event),
       });
 
-      if (error) {
-        this.log.debug("Error creating iCalString");
-
-        return {
-          uid,
-          type: event.type,
-          id: typeof event.uid === "string" ? event.uid : "-1",
-          password: "",
-          url: typeof event.location === "string" ? event.location : "-1",
-          additionalInfo: {},
-        };
-      }
       let calendarEvent: CalendarEventType;
       const eventsToUpdate = events.filter((e) => e.uid === uid);
       return Promise.all(

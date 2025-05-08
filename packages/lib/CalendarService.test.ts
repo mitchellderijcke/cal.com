@@ -1,6 +1,5 @@
-import * as ics from "ics";
 import { createCalendarObject, fetchCalendarObjects, updateCalendarObject } from "tsdav";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Person } from "@calcom/types/Calendar";
 import type { CredentialPayload } from "@calcom/types/Credential";
@@ -51,17 +50,6 @@ vi.mock("uuid", () => {
 
 class MockCalendarService extends CalendarService {}
 
-function getDefaultTimestamp() {
-  const davEvent = ics.createEvent({
-    start: [2025, 1, 1, 13],
-    end: [2025, 1, 1, 14],
-  });
-
-  return davEvent.value?.match(/DTSTAMP:(.*)/)?.[1];
-}
-
-const DEFAULT_TIMESTAMP = getDefaultTimestamp();
-
 function getExpectedICS({ title }: { title: string }) {
   return `BEGIN:VCALENDAR
 VERSION:2.0
@@ -71,7 +59,7 @@ X-PUBLISHED-TTL:PT1H
 BEGIN:VEVENT
 UID:00000000-0000-0000-0000-000000000001
 SUMMARY:${title}
-DTSTAMP:${DEFAULT_TIMESTAMP}
+DTSTAMP:20250101T000000Z
 DTSTART:20250101T000000Z
 DESCRIPTION:Test Description
 LOCATION:Test Location
@@ -117,36 +105,6 @@ const TEST_EVENT = {
   ],
 };
 
-function getExpectedICSInput({ title }: { title: string }) {
-  return {
-    startInputType: "utc",
-    uid: "00000000-0000-0000-0000-000000000001",
-    duration: {
-      minutes: 60,
-    },
-    start: [2025, 1, 1, 0, 0, 0],
-    title,
-    description: "Test Description",
-    location: "Test Location",
-    organizer: {
-      email: "test@test.com",
-      name: "Test Organizer",
-    },
-    attendees: [
-      {
-        email: "attendee@test.com",
-        name: "Test Attendee",
-        partstat: "NEEDS-ACTION",
-      },
-      {
-        email: "test2@test.com",
-        name: "Test Organizer 2",
-        partstat: "NEEDS-ACTION",
-      },
-    ],
-  };
-}
-
 const TEST_CREDENTIAL = {
   user: {
     email: "test@test.com",
@@ -154,21 +112,22 @@ const TEST_CREDENTIAL = {
 } as CredentialPayload;
 
 describe("CalendarService", () => {
+  beforeEach(() => {
+    vi.setSystemTime("2025-01-01T00:00:00.000Z");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("creates events", async () => {
     vi.mocked(createCalendarObject).mockResolvedValue({
       ok: true,
     } as Response);
-    const createEventSpy = vi.spyOn(ics, "createEvent");
 
     const calendarService = new MockCalendarService(TEST_CREDENTIAL, "test");
 
     const events = await calendarService.createEvent(TEST_EVENT, 1);
-
-    expect(createEventSpy).toHaveBeenCalledWith(
-      getExpectedICSInput({
-        title: "Test Event",
-      })
-    );
 
     expect(createCalendarObject).toHaveBeenCalledWith({
       calendar: {
@@ -204,19 +163,12 @@ describe("CalendarService", () => {
       status: 200,
     } as Response);
 
-    const createEventSpy = vi.spyOn(ics, "createEvent");
     const calendarService = new MockCalendarService(TEST_CREDENTIAL, "test");
 
     const events = await calendarService.updateEvent("00000000-0000-0000-0000-000000000001", {
       ...TEST_EVENT,
       title: "NEW TITLE",
     });
-
-    expect(createEventSpy).toHaveBeenCalledWith(
-      getExpectedICSInput({
-        title: "NEW TITLE",
-      })
-    );
 
     expect(updateCalendarObject).toHaveBeenCalledWith({
       calendarObject: {
